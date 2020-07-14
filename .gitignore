@@ -1,0 +1,6 @@
+# Raku
+/lib/.precomp
+
+# Others
+/.idea/
+/tmp/
