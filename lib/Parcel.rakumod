@@ -3,97 +3,9 @@ use Tilwa::MergeList;
 
 unit module Parcel;
 
-our @UNIT-SYMBOLS = <!UNIT_MARKER $! $/ $=finish $=pod $¢ EXPORT GLOBALish>; # Inside unit scope, includes CORE::<$! $/ $=pod> (CHECKME)
-our @PKG-SYMBOLS = |<$?PACKAGE ::?PACKAGE>, # Inside a package
-	|<$?MODULE ::?MODULE>, # Inside a module
-	|<$?CLASS ::?CLASS>, # Inside a class
-	|<$?CONCRETIZATION $?ROLE ::?ROLE>, # Inside a role, in addition to class
-;
-our @MY-SYMBOLS = <$_>; # Inside any lexical scope
-our @BLOCK-SYMBOLS = <$*DISPATCHER>; # Immediately inside a bare block eg. `{ ... }` and not `do { ... }`. It is MY-scoped
-
-#| Tests if package::{$symbol} is almost surely a package
-#| Exceptions are if you name a sigiless variable the same as its class
-#| or if you .^rename a variable to match it's identifier
-sub isas-package(\package, Str $symbol) is export {
-	$symbol eq package::{$symbol}.^shortname
-}
-
-=head2 Equivalents
-
-#| Get lexicals in scope aka MY::
-sub get-locals is export {
-	CALLER::.keys.sort
-}
-
-#| Get our-scoped symbols aka OUR::
-sub get-packaged is export {
-	# We use LEXICAL because we want to follow lexical scopes and not call scopes
-	my \p = CALLER::OUR;
-	p::.keys.sort;
-}
-
-=head2 Specifics
-
-# The get-ours and get-mine exclude packages and only return variable identifiers
-
-#| Get our-scoped symbols that aren't packages
-sub get-ours is export {
-	my \p = CALLER::OUR;
-	p::.keys.grep({ ! isas-package p, $_ }).sort;
-}
-
-#| Get lexical symbols declared in this scope excluding packages
-#| Ignores symbols that are always there even if they are redeclared because we can't detect that
-sub get-mine is export {
-	my \m = CALLER::MY;
-
-	# Remove predefined symbols
-	my $keys = m::.keys ∖ @PKG-SYMBOLS ∖ @MY-SYMBOLS ∖ @BLOCK-SYMBOLS;
-	if m::<!UNIT_MARKER>:exists { $keys = $keys ∖ @UNIT-SYMBOLS }
-
-	# Filter out packages
-	$keys = $keys.keys.grep: { ! isas-package m, $_ };
-	
-	return $keys.sort
-}
-
-#| Get unit-scoped symbols that aren't predefined
-sub get-units is export {
-	my \p = CALLER::UNIT;
-	(p::.keys ∖ @UNIT-SYMBOLS ∖ @PKG-SYMBOLS ∖ @MY-SYMBOLS).keys.sort
-}
-
-#| Get packages defined in scope. Includes my-scoped packages
-sub get-packs is export {
-	my \m = CALLER::MY;
-	my \p = CALLER::OUR;
-
-	my $keys = m::.keys.grep({ isas-package m, $_ }) ∪ p::.keys.grep({ isas-package p, $_ });
-	return $keys.keys.sort
-}
-
-#| Get packages defined in this lexical scope. This may include imported packages
-sub get-mypacks is export {
-	my \m = CALLER::MY;
-	my \p = CALLER::OUR;
-
-	my $keys = m::.keys.grep({ isas-package(m, $_) && ! grep $_, p::.keys});
-	if m::<!UNIT_MARKER>:exists { $keys .= grep: { ! grep $_, @UNIT-SYMBOLS } }
-	return $keys.sort;
-}
-
-#| Get packages defined in this package
-sub get-ourpacks is export {
-	my \m = CALLER::OUR;
-
-	my $keys = m::.keys.grep({ isas-package(m, $_) });
-	return $keys.sort;
-}
-
 =head2 Trees
 
-enum Ptype <Package Module Class Role Enum Variant Subset CurriedRole Native NQPClass NativeRef Metamodel? NQPParametricRole>;
+enum Ptype <Package Module Class Role Enum Variant Subset CurriedRole Native NQPClass NativeRef Metamodely NQPParametricRole>;
 
 sub get-ptype-str (Str $HOW --> Ptype) {
 	given $HOW {
@@ -123,16 +35,83 @@ class Pkg {
 	has Str $.refname; # fully qualified name, for loops and aliases
 
 	method gist {
-		"({$!type.lc} {$!name}{ " → $!refname" if $!refname })"
+		"("
+		~ $!type.lc
+		~ " " ~ $!name
+		~ (" → $!refname" if $!refname)
+		~ ")"
 	}
 }
 
 class Tree {
 	has Pkg $.node is required;
 	has Tree @.children; # sorted by name
-	method gist {
-		"{$!node.gist}"
-		~ (' ⸬ {' ~ @!children».gist.join(', ') ~ '}' if @!children)
+	has Str @.symbols;
+
+	multi method gist (::?CLASS:D:) {
+		"("
+		~ "{$!node.gist}"
+		~ (', [' ~ @!children».gist.join(', ') ~ ']' if @!children)
+		~ ")"
+	}
+
+	multi method gist (::?CLASS:U:) {
+		'(' ~ self.^name ~ ')'
+	}
+
+	method read (IO() $file --> Tree) {
+		use MONKEY-SEE-NO-EVAL;
+		EVAL $file.slurp
+	}
+
+	method dump (::?CLASS:D: IO() $file) {
+		$file.spurt(self.raku)
+	}
+
+	#| TODO doc
+	multi method pretty-print (::?CLASS:D: Bool :$novariant, Bool :$noself, Bool :$longname) {
+		my $PACKAGE = $?PACKAGE.^name.split('::').[0..*-2].join('::'); # Because we're inside class Tree
+		sub f (Tree $tree, @has-next) {
+			sub print-junctions {
+				my $last = @has-next.elems - 1;
+				for @has-next.kv -> $i, $draw {
+					if $i == $last {
+						print ($draw ?? '├' !! '└') ~ '──╴'
+					} else {
+						print $draw ?? '│   ' !! '    '
+					}
+				}
+			}
+
+			print-junctions;
+			with $tree.node {
+				print
+					($longname ?? .longname !! .name || .longname || .refname)
+						~ (" {.lc}" with .type)
+					~  (" → {.refname}" if .refname)
+			}
+
+			print "\n";
+
+			my @children = $tree.children;
+			# Remove variants if we're not an enum
+			if $novariant && $tree.node.type != Ptype::Enum {
+				@children .= grep: { $_.node.type != Ptype::Variant }
+			}
+			# Remove self if needed
+			if $noself {
+				@children .= grep: { $_.node.longname ne $PACKAGE }
+			}
+			my $last = @children.elems - 1;
+			for @children.kv -> $k, $v {
+				f $v, (|@has-next, $k != $last)
+			}
+		}
+
+		f self, ()
+	}
+	multi method pretty-print (::?CLASS:U: |) {
+		say "No tree";
 	}
 }
 
@@ -140,9 +119,23 @@ class Tree {
 class TreeDiff {
 	has Tree $.left;
 	has Tree $.right;
+
+	method gist {
+		"left => {$!left.gist} right => {$!right.gist}"
+	}
+
+	multi method pretty-print (::?CLASS:D:) {
+		say "Left tree:";
+		$!left.pretty-print;
+		say "Right tree:";
+		$!right.pretty-print;
+	}
+	multi method pretty-print (::?CLASS:U:) {
+		say "No differences";
+	}
 }
 
-sub diff-tree (Tree $a, Tree $b --> TreeDiff) is export {
+multi sub diff-tree (Tree:D $a, Tree:D $b --> TreeDiff) is export {
 	# assumes that we start from the same root
 	unless $a.node eqv $b.node {
 		return TreeDiff.new: left => $a, right => $b
@@ -169,53 +162,22 @@ sub diff-tree (Tree $a, Tree $b --> TreeDiff) is export {
 
 	if @left.elems == 0 && @right.elems == 0 { return TreeDiff }
 
-	return TreeDiff.new: |(:@left if @left), |(:@right if @right)
+	return TreeDiff.new:
+		|(left => Tree.new(node => $a.node, children => @left) if @left),
+		|(right => Tree.new(node => $b.node, children => @right) if @right)
 }
 
-multi sub pretty-tree (Tree:D $t, Bool :$novariant, Bool :$noself, Bool :$longname) is export {
-	sub f (Tree $tree, @has-next) {
-		sub print-junctions {
-			my $last = @has-next.elems - 1;
-			for @has-next.kv -> $i, $draw {
-				if $i == $last {
-					print ($draw ?? '├' !! '└') ~ '──╴'
-				} else {
-					print $draw ?? '│   ' !! '    '
-				}
-			}
-		}
+multi sub diff-tree (Tree:D $a, IO() $bfile --> TreeDiff) { diff-tree $a, Tree.read($bfile) }
+multi sub diff-tree (IO() $afile, Tree:D $b --> TreeDiff) { diff-tree Tree.read($afile), $b }
+multi sub diff-tree (IO() $afile, IO() $bfile --> TreeDiff) { diff-tree Tree.read($afile), Tree.read($bfile) }
 
-		print-junctions;
-		with $tree.node {
-			print "{$longname ?? .longname !! .name} {with .type -> $t { $t.lc }}" ~  (" → {.refname}" if .refname)
-		}
+multi sub infix:<(^)> (Tree:D $a, Tree:D $b) is export { diff-tree $a, $b }
+multi sub infix:<⊖> (Tree:D $a, Tree:D $b) is export { diff-tree $a, $b }
 
-		print "\n";
+multi sub pretty-tree (Tree $t, |c) is export { $t.pretty-print: |c }
+multi sub pretty-tree (TreeDiff $d) { $d.pretty-print }
 
-		my @children = $tree.children;
-		# Remove variants if we're not an enum
-		if $novariant && $tree.node.type != Ptype::Enum {
-			@children .= grep: { $_.node.type != Ptype::Variant }
-		}
-		# Remove self if needed
-		if $noself {
-			@children .= grep: { $_.node.longname ne $?PACKAGE.^name }
-		}
-		my $last = @children.elems - 1;
-		for @children.kv -> $k, $v {
-			f $v, (|@has-next, $k != $last)
-		}
-	}
-
-	f $t, ()
-}
-
-multi sub pretty-tree (TreeDiff:D $d) {
-	say "Left tree:";
-	with $d.left -> $l { pretty-tree $l } else { say "(Tree)" }
-	say "Right tree:";
-	with $d.right -> $l { pretty-tree $l } else { say "(Tree)" }
-}
+sub pretty-tree-diff (|c) is export { pretty-tree diff-tree(|c) }
 
 =begin pod
 
@@ -228,75 +190,91 @@ This leads to infinite loop if not handled
 
 =end pod
 
-sub subtree (\p, Str $name, Str $longname --> Tree) {
-	#say "=== processing $name";
+=head2 Dumping trees
 
+#|[ Builds the package tree starting at p, with displayname $name and name $longname.
+The last one is used to check if the package is aliased, so set it correctly
+Example: subtree X::Attribute, 'Attribute', 'X::Attribute'
+]
+sub subtree (\p, Str $name, Str $longname --> Tree) {
 	my $fullname = p.^name;
 	if $fullname ~~ /LoweredAwayLexical/ { return Tree }
 	my $type = get-ptype(p);
-	my $is-enum = $type == Ptype::Enum;
-	my $has-keys = so p::; # calling .keys on a null object dies unconditionally
+	my @symbols; # symbols in the current package that aren't packages
 
-	#say "$longname isa $type";
-	#say "keys in $longname: " ~ p::.keys.sort;
+	#| When the current package is an enum
+	sub take-enum {
+		if $name eq p.^shortname { # This is the actual enum
+			for p::.keys.sort -> $variant {
+				take Tree.new: node => Pkg.new(:name($variant), :type(Ptype::Variant), :refname(p.^name), :$longname)
+			}
+		} else { # This is a variant
+			$type = Ptype::Variant;
+		}
+	}
 
-	my @children = do if $has-keys { gather do {
-		if !$is-enum {
-			for p::.keys.grep(* ~~ /^<:L>/).sort -> $key {
-				my $n-longname = ($longname ~ '::' if $longname) ~ $key;
-				my \r = p::{$key}; # not q because that's reserved
+	#| When the current package is not an enum and we explore its children
+	sub take-normal (Str $key) {
+		my $n-longname = ($longname ~ '::' if $longname) ~ $key;
+		my \r = p::{$key}; # not q because that's reserved
 
-				unless r.WHAT ~~ Any {
-					#note "GOT {r.^name}";
-					# Higher than Any
-					# Otherwise it fails to bind to the p parameter in the call to subtree
-					my $refname = r.^name if $n-longname ne r.^name;
-					if r.^name ~~ /Metamodel/ {
-						take Tree.new: node => Pkg.new(
-							:name($key), :type(Ptype::<Metamodel?>), |with-val :$refname, :longname($n-longname));
-					} else {
-						my $type = get-ptype-str(r.HOW.^name);
-						take Tree.new: node => Pkg.new(:name($key), :$type, |with-val :$refname, :longname($n-longname));
-						CATCH {
-							$*ERR.say: "processing $n-longname failed of { r.WHAT.^name } ofof { r.HOW.^name }"
-						}
-					}
-					next;
-				}
+		unless r.WHAT ~~ Any {
+			# The current package is higher than Any so binding to parameter p in the call to subtree fails
+			my $refname = r.^name if $n-longname ne r.^name;
+			# Guess the type
+			if r.^name ~~ /Metamodel/ {
+				take Tree.new: node => Pkg.new(
+					:name($key), :type(Ptype::Metamodely), |with-val :$refname, :longname($n-longname));
+			} else {
+				my $type = get-ptype-str(r.HOW.^name);
+				take Tree.new: node => Pkg.new(:name($key), :$type, |with-val :$refname, :longname($n-longname));
 
-				my $v = subtree r, $key, $n-longname;
-				take $v with $v;
-				CATCH {
-					$*ERR.say: "processing $n-longname";
-					.note;
-					next;
+				CATCH { # Unknown package type
+					$*ERR.say: "processing $n-longname failed of { r.WHAT.^name } ofof { r.HOW.^name }"
 				}
 			}
+			return;
+		}
 
+		my $v = subtree r, $key, $n-longname;
+		take $v with $v;
+	}
+
+	my $has-keys = so p::; # calling .keys on a null object dies unconditionally
+	my @children = do if $has-keys { gather do {
+		if $type == Ptype::Enum {
+			take-enum
 		} else {
-			my $is-enum-root = $name eq p.^shortname; # Is this a variant of the enum name ?
-			if $is-enum-root {
-				for p::.keys.sort -> $variant {
-					take Tree.new: node => Pkg.new(:name($variant), :type(Ptype::Variant), :refname(p.^name), :$longname)
-				}
-			} else {
-				$type = Ptype::Variant;
+			my @packs; # divide packages and symbols
+			for p::.keys -> $k { $k ~~ /^<:L>/ ?? @packs.push($k) !! @symbols.push($k) }
+			for @packs.sort -> $key {
+				take-normal $key
 			}
 		}
 	}}
 	my $refname = $longname ne $fullname ?? $fullname !! Str;
 
-	Tree.new: node => Pkg.new(:$name, :$type, |with-val :$refname, :$longname), :@children,
+	Tree.new: node => Pkg.new(:$name, :$type, |with-val :$refname, :$longname), :@children, :@symbols
 }
 
-sub get-coretree (--> Tree) is export {
-	subtree CORE, '', ''
+sub get-coretree (--> Tree) is export { subtree CORE, '', '' }
+
+sub get-ourtree (--> Tree) is export { subtree CALLER::OUR, 'OUR', '' }
+
+sub get-mytree (--> Tree) is export { subtree CALLER::MY, 'MY', '' }
+
+my @PACKS = <MY OUR CORE GLOBAL PROCESS COMPILING CALLER CALLERS DYNAMIC OUTER OUTERS LEXICAL UNIT SETTING PARENT CLIENT>;
+
+sub get-sometree (\p --> Tree) is export {
+	my $name = p.^name;
+	my $shortname = $name.split('::')[*-1];
+	$name ~~ s/ '::'? @PACKS [ '::' @PACKS <wb> ]? '::'? //;
+
+	subtree(p, $shortname, $name)
 }
 
-sub get-mytree (--> Tree) is export {
-	my \p = CALLER::MY;
-	subtree p, 'MY', ''
-}
+multi sub dump-tree (\p, IO() $file --> Bool) { $file.spurt: get-sometree(p).raku }
+multi sub dump-tree (\p, IO() :$to! --> Bool) { dump-tree(p, $to) }
 
 =begin pod
 

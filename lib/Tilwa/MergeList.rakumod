@@ -14,18 +14,18 @@ sub merge-lists (Iterable $a, Iterable $b, &left, &both = -> $x, $ { &left($x) }
 
 	my $l := $A.pull-one;
 	my $r := $B.pull-one;
-	while $l !=:= IterationEnd && $r !=:= IterationEnd {
+	until $l =:= IterationEnd || $r =:= IterationEnd {
 		given &cmp($l, $r) {
-			with Less { &left($l); $l := $A.pull-one; }
-			with Same { &both($l, $r) }
-			with More { &right($r); $r := $B.pull-one; }
+			when Less { &left($l); $l := $A.pull-one; }
+			when Same { &both($l, $r); $l := $A.pull-one; $r := $B.pull-one }
+			when More { &right($r); $r := $B.pull-one; }
 		}
 	}
-	while $l !=:= IterationEnd {
+	until $l =:= IterationEnd {
 		&left($l);
 		$l := $A.pull-one;
 	}
-	while $r !=:= IterationEnd {
+	until $r =:= IterationEnd {
 		&right($r);
 		$r := $B.pull-one;
 	}

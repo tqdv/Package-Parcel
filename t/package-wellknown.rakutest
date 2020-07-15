@@ -1,0 +1,68 @@
+need Test;
+need Package::WellKnown;
+
+my \T = Test::EXPORT::DEFAULT;
+my \P = Package::WellKnown::EXPORT::DEFAULT;
+
+T::<&plan>(13);
+
+my ($a, $b, $c);
+our @a;
+
+package Inner {
+	package Pa::ckage {
+		# ^ Avoid weird behaviour where the package gets put in UNIT
+		# if there are multiple package declarations with the same root
+		my $d;
+		our @b;
+		class C {}
+		role R {}
+		my package Pack {}
+
+		say "# 1. In nested package:";
+
+		T::<&is>(P::<&get-mine>(), '$d', "get-mine is local variables №1");
+		T::<&is>(P::<&get-ours>(), '@b', "get-ours is our-scoped variables №1");
+
+		T::<&is>(P::<&get-locals>(),   MY::.keys.sort, "get-locals is MY №1");
+		T::<&is>(P::<&get-packaged>(), OUR::.keys.sort, "get-packaged is OUR №1");
+		{
+			say "# 2. In nested package + block:";
+
+			T::<&is>(P::<&get-mine>(), '', "get-mine is local variables №2");
+			T::<&is>(P::<&get-ours>(), '@b', "get-ours is only our-scoped variables №2");
+
+			T::<&is>(P::<&get-locals>(), MY::.keys.sort, "get-locals is MY №2");
+			T::<&is>(P::<&get-packaged>(), OUR::.keys.sort, "get-packaged is OUR №2");
+		}
+	}
+}
+my package MyPack {}
+
+say "# 3. In unit:";
+
+T::<&is>(P::<&get-mine>(), '$a $b $c P T', "get-mine is local variables №3");
+T::<&is>(P::<&get-ours>(), '@a', "get-ours is our-scoped variables №3");
+
+T::<&is>(P::<&get-mypacks>(), 'MyPack Package Test', "get-mypacks is my-scoped packages №3");
+T::<&is>(P::<&get-ourpacks>(), 'Inner', "get-ourpacks is our-scoped packages №3");
+
+T::<&subtest>("isas-package", {
+	T::<&plan>(4);
+
+	my &ok = T::<&ok>; my &nok = T::<&nok>; my &skip = T::<&skip>;
+	my &isas-package = Package::WellKnown::EXPORT::util::<&isas-package>;
+
+	ok isas-package(OUR, "Inner"), "Inner is a package";
+	nok isas-package(OUTER, "T"), "T is not a package";
+
+	my \Hash = Hash;
+	nok isas-package(MY, "Hash"), '\Hash is not a package';
+
+	my $renamed;
+	$renamed.^set_name('$renamed');
+	skip "We can't tell if a renamed symbol is a package or not";
+	if False {
+		nok isas-package(MY, '$renamed'), '$renamed is not a package';
+	}
+});
