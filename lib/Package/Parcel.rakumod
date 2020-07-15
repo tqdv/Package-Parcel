@@ -1,13 +1,14 @@
+unit module Package::Parcel;
+# Because package tracking → parcel tracking
+
 use Tilwa::WithVal;
 use Tilwa::MergeList;
-
-unit module Parcel;
 
 =head2 Trees
 
 enum Ptype <Package Module Class Role Enum Variant Subset CurriedRole Native NQPClass NativeRef Metamodely NQPParametricRole>;
 
-sub get-ptype-str (Str $HOW --> Ptype) {
+sub get-ptype-str (Str $HOW --> Ptype) is export(:func) {
 	given $HOW {
 		when /'Metamodel::PackageHOW'/ { Ptype::Package }
 		when /'Metamodel::ModuleHOW'/ { Ptype::Module }
@@ -20,19 +21,20 @@ sub get-ptype-str (Str $HOW --> Ptype) {
 		when /'Metamodel::NativeRefHOW'/ { Ptype::NativeRef }
 		when /'NQPClassHOW'/ { Ptype::NQPClass }
 		when /'NQPParametricRoleHOW'/ { Ptype::NQPParametricRole }
-		default { .note }
+		default { .note } # Throws because of the type check
 	}
 }
 
-sub get-ptype (Mu \p --> Ptype) {
+sub get-ptype (\p --> Ptype) is export(:func) {
 	get-ptype-str p.HOW.^name
 }
 
 class Pkg {
-	has Str $.name; # short name
+	has Str $.name; # eg. WellKnown
 	has Ptype $.type; # package type
-	has Str $.longname; # with all parents
-	has Str $.refname; # fully qualified name, for loops and aliases
+	has Str $.longname; # eg. Package::WellKnown
+	has Str $.refname; # fully qualified name for variants eg. Ptype::Class → Ptype
+	# ^ and maybe imports and aliases ? eg. M::A → Module::A ?
 
 	method gist {
 		"("
@@ -46,7 +48,7 @@ class Pkg {
 class Tree {
 	has Pkg $.node is required;
 	has Tree @.children; # sorted by name
-	has Str @.symbols;
+	has Str @.symbols; # sorted by name
 
 	multi method gist (::?CLASS:D:) {
 		"("
@@ -68,8 +70,15 @@ class Tree {
 		$file.spurt(self.raku)
 	}
 
-	#| TODO doc
-	multi method pretty-print (::?CLASS:D: Bool :$novariant, Bool :$noself, Bool :$longname) {
+	#|[ Pretty prints our tree with box drawing lines.
+	Flags:
+	- :novariant, doesn't print variants when they're not inside their enum.
+	  eg. enum E <A B> will print E::A and E::B, but not ::A and ::B
+	- :noself, don't print the current package nor its children eg. Parcel::
+	- :longname, use longnames (eg. Package::WellKnown) instead of the shortname (eg. WellKnown) in the tree
+	- :symbols<$>, set to 'all' to print all symbols, set to 'leaf' to print symbols only in leaf nodes
+	]
+	multi method pretty-print (::?CLASS:D: Bool :$novariant, Bool :$noself, Bool :$longname, Str :$symbols) {
 		my $PACKAGE = $?PACKAGE.^name.split('::').[0..*-2].join('::'); # Because we're inside class Tree
 		sub f (Tree $tree, @has-next) {
 			sub print-junctions {
@@ -89,6 +98,9 @@ class Tree {
 					($longname ?? .longname !! .name || .longname || .refname)
 						~ (" {.lc}" with .type)
 					~  (" → {.refname}" if .refname)
+			}
+			if ($symbols eq 'all') || ($symbols eq 'leaf' && !$tree.children) {
+				print " (" ~ $tree.symbols ~ ")"
 			}
 
 			print "\n";
@@ -126,23 +138,23 @@ class TreeDiff {
 
 	multi method pretty-print (::?CLASS:D:) {
 		say "Left tree:";
-		$!left.pretty-print;
+		$!left.pretty-print(:symbols<leaf>);
 		say "Right tree:";
-		$!right.pretty-print;
+		$!right.pretty-print(:symbols<leaf>);
 	}
 	multi method pretty-print (::?CLASS:U:) {
 		say "No differences";
 	}
 }
 
+#| Returns a DiffTree of the differences between the two trees
 multi sub diff-tree (Tree:D $a, Tree:D $b --> TreeDiff) is export {
 	# assumes that we start from the same root
 	unless $a.node eqv $b.node {
 		return TreeDiff.new: left => $a, right => $b
 	}
 
-	my @left;
-	my @right;
+	my (@left, @right);
 
 	merge-lists $a.children, $b.children,
 		{ @left.push($_) },
@@ -160,11 +172,17 @@ multi sub diff-tree (Tree:D $a, Tree:D $b --> TreeDiff) is export {
 			}
 		};
 
-	if @left.elems == 0 && @right.elems == 0 { return TreeDiff }
+	my (@lsym, @rsym);
+	merge-lists $a.symbols, $b.symbols,
+		{ @lsym.push($_) },
+		{},
+		{ @rsym.push($_) };
+
+	unless @left || @right || @lsym || @rsym { return TreeDiff }
 
 	return TreeDiff.new:
-		|(left => Tree.new(node => $a.node, children => @left) if @left),
-		|(right => Tree.new(node => $b.node, children => @right) if @right)
+		left  => Tree.new(node => $a.node, children => @left,  symbols => @lsym),
+		right => Tree.new(node => $b.node, children => @right, symbols => @rsym)
 }
 
 multi sub diff-tree (Tree:D $a, IO() $bfile --> TreeDiff) { diff-tree $a, Tree.read($bfile) }
@@ -179,24 +197,13 @@ multi sub pretty-tree (TreeDiff $d) { $d.pretty-print }
 
 sub pretty-tree-diff (|c) is export { pretty-tree diff-tree(|c) }
 
-=begin pod
-
-Stashes named after enum variants refer to the enum stash:
-  enum A <B C>;
-  is A::, B::;
-  is A::. C::;
-This leads to infinite loop if not handled
-
-
-=end pod
-
 =head2 Dumping trees
 
 #|[ Builds the package tree starting at p, with displayname $name and name $longname.
 The last one is used to check if the package is aliased, so set it correctly
 Example: subtree X::Attribute, 'Attribute', 'X::Attribute'
 ]
-sub subtree (\p, Str $name, Str $longname --> Tree) {
+sub subtree (\p, Str $name, Str $longname --> Tree) is export(:func) {
 	my $fullname = p.^name;
 	if $fullname ~~ /LoweredAwayLexical/ { return Tree }
 	my $type = get-ptype(p);
@@ -246,8 +253,8 @@ sub subtree (\p, Str $name, Str $longname --> Tree) {
 			take-enum
 		} else {
 			my @packs; # divide packages and symbols
-			for p::.keys -> $k { $k ~~ /^<:L>/ ?? @packs.push($k) !! @symbols.push($k) }
-			for @packs.sort -> $key {
+			for p::.keys.sort -> $k { $k ~~ /^<:L>/ ?? @packs.push($k) !! @symbols.push($k) }
+			for @packs -> $key {
 				take-normal $key
 			}
 		}
@@ -263,9 +270,9 @@ sub get-ourtree (--> Tree) is export { subtree CALLER::OUR, 'OUR', '' }
 
 sub get-mytree (--> Tree) is export { subtree CALLER::MY, 'MY', '' }
 
-my @PACKS = <MY OUR CORE GLOBAL PROCESS COMPILING CALLER CALLERS DYNAMIC OUTER OUTERS LEXICAL UNIT SETTING PARENT CLIENT>;
+our @PACKS = <MY OUR CORE GLOBAL PROCESS COMPILING CALLER CALLERS DYNAMIC OUTER OUTERS LEXICAL UNIT SETTING PARENT CLIENT>;
 
-sub get-sometree (\p --> Tree) is export {
+sub get-sometree (\p --> Tree) is export(:tree) {
 	my $name = p.^name;
 	my $shortname = $name.split('::')[*-1];
 	$name ~~ s/ '::'? @PACKS [ '::' @PACKS <wb> ]? '::'? //;
@@ -273,18 +280,17 @@ sub get-sometree (\p --> Tree) is export {
 	subtree(p, $shortname, $name)
 }
 
-multi sub dump-tree (\p, IO() $file --> Bool) { $file.spurt: get-sometree(p).raku }
+multi sub dump-tree (\p, IO() $file --> Bool) is export(:tree) { $file.spurt: get-sometree(p).raku }
 multi sub dump-tree (\p, IO() :$to! --> Bool) { dump-tree(p, $to) }
 
 =begin pod
 
-=head2 Caveats
-
-We can't differentiate imported symbols from symbols defined in the current scope
-
 =head2 Notes
 
-We use CALLER::MY instead of CALLER in some places, because isas-package fails with this otherwise:
-  Cannot access '$_' through CALLER, because it is not declared as dynamic
+Stashes named after enum variants refer to the enum stash:
+  enum A <B C>;
+  is A::, B::;
+  is A::. C::;
+This leads to infinite loop if not handled
 
 =end pod

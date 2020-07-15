@@ -77,3 +77,16 @@ sub get-ourpacks is export {
 	my $keys = p::.keys.grep({ isas-package(p, $_) });
 	return $keys.sort;
 }
+
+=begin pod
+
+=head2 Caveats
+
+We can't differentiate imported symbols from symbols defined in the current scope
+
+=head2 Notes
+
+We use CLIENT::MY instead of CLIENT in some places, because isas-package fails with this otherwise:
+  Cannot access '$_' through CLIENT, because it is not declared as dynamic
+
+=end pod
