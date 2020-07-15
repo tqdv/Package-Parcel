@@ -1,5 +1,10 @@
-unit module Package::Parcel;
+unit module Parcel;
+# Naming it Parcel instead of Package::Parcel makes EVAL work in Tree.read FIXME
 # Because package tracking → parcel tracking
+
+# :DEFAULT exports pretty-tree, pretty-tree-diff and diff-tree, get-tree and read-tree
+# :tree exports specific tree functions like get-coretree, get-sometree, etc…
+# :func exports the low-level functions get-ptype-str and subtree
 
 use Tilwa::WithVal;
 use Tilwa::MergeList;
@@ -70,6 +75,10 @@ class Tree {
 		$file.spurt(self.raku)
 	}
 
+	# The order of definition of these multis somehow matters...
+	multi method pretty-print (::?CLASS:D: :$default!) {
+		self.pretty-print: :noself, :novariant, :symbols<leaf>
+	}
 	#|[ Pretty prints our tree with box drawing lines.
 	Flags:
 	- :novariant, doesn't print variants when they're not inside their enum.
@@ -99,7 +108,7 @@ class Tree {
 						~ (" {.lc}" with .type)
 					~  (" → {.refname}" if .refname)
 			}
-			if ($symbols eq 'all') || ($symbols eq 'leaf' && !$tree.children) {
+			if $tree.symbols && $symbols.defined && ($symbols eq 'all' || $symbols eq 'leaf' && !$tree.children) {
 				print " (" ~ $tree.symbols ~ ")"
 			}
 
@@ -155,7 +164,6 @@ multi sub diff-tree (Tree:D $a, Tree:D $b --> TreeDiff) is export {
 	}
 
 	my (@left, @right);
-
 	merge-lists $a.children, $b.children,
 		{ @left.push($_) },
 		{ with diff-tree $^a, $^b -> $d {
@@ -163,26 +171,19 @@ multi sub diff-tree (Tree:D $a, Tree:D $b --> TreeDiff) is export {
 			with $d.right -> $_ { @right.push($_) }
 		} },
 		{ @right.push($_) },
-		sub cmp ($a, $b) {
-			if $a.node eqv $b.node { return Same }
-			given $a.node.name cmp $b.node.name {
-				when Less { return Less }
-				when More { return More }
-				when Same { return Less }
-			}
-		};
+		{ $^a.node.name cmp $^b.node.name };
 
 	my (@lsym, @rsym);
 	merge-lists $a.symbols, $b.symbols,
 		{ @lsym.push($_) },
-		{},
+		-> *@ {},
 		{ @rsym.push($_) };
 
-	unless @left || @right || @lsym || @rsym { return TreeDiff }
+	unless @left || @right || @lsym || @rsym { return TreeDiff } # Everything is the same
 
 	return TreeDiff.new:
-		left  => Tree.new(node => $a.node, children => @left,  symbols => @lsym),
-		right => Tree.new(node => $b.node, children => @right, symbols => @rsym)
+		|(left  => Tree.new(node => $a.node, children => @left,  symbols => @lsym) if @left || @lsym),
+		|(right => Tree.new(node => $b.node, children => @right, symbols => @rsym) if @right || @rsym),
 }
 
 multi sub diff-tree (Tree:D $a, IO() $bfile --> TreeDiff) { diff-tree $a, Tree.read($bfile) }
@@ -194,8 +195,9 @@ multi sub infix:<⊖> (Tree:D $a, Tree:D $b) is export { diff-tree $a, $b }
 
 multi sub pretty-tree (Tree $t, |c) is export { $t.pretty-print: |c }
 multi sub pretty-tree (TreeDiff $d) { $d.pretty-print }
+multi sub pretty-tree (Str $filename, |c) { Tree.read($filename).pretty-print(|c) }
 
-sub pretty-tree-diff (|c) is export { pretty-tree diff-tree(|c) }
+sub pretty-tree-diff ($a, $b, |c) is export { pretty-tree diff-tree($a, $b), |c }
 
 =head2 Dumping trees
 
@@ -264,11 +266,15 @@ sub subtree (\p, Str $name, Str $longname --> Tree) is export(:func) {
 	Tree.new: node => Pkg.new(:$name, :$type, |with-val :$refname, :$longname), :@children, :@symbols
 }
 
-sub get-coretree (--> Tree) is export { subtree CORE, '', '' }
+sub get-coretree (--> Tree) is export(:tree) { subtree CORE, '', '' }
+sub get-ourtree (--> Tree) is export(:tree) { subtree CLIENT::OUR, 'OUR', '' }
+sub get-mytree (--> Tree) is export(:tree) { subtree CLIENT::MY, 'MY', '' }
 
-sub get-ourtree (--> Tree) is export { subtree CALLER::OUR, 'OUR', '' }
-
-sub get-mytree (--> Tree) is export { subtree CALLER::MY, 'MY', '' }
+sub get-tree (--> Tree) is export {
+	Tree.new:
+		node => Pkg.new(:name<::>, :longname(''), :type(Ptype::Package)),
+		children => (get-coretree, get-ourtree, get-mytree)
+}
 
 our @PACKS = <MY OUR CORE GLOBAL PROCESS COMPILING CALLER CALLERS DYNAMIC OUTER OUTERS LEXICAL UNIT SETTING PARENT CLIENT>;
 
@@ -280,7 +286,13 @@ sub get-sometree (\p --> Tree) is export(:tree) {
 	subtree(p, $shortname, $name)
 }
 
-multi sub dump-tree (\p, IO() $file --> Bool) is export(:tree) { $file.spurt: get-sometree(p).raku }
+sub read-tree (IO() $file --> Tree) is export {
+	Tree.read($file)
+}
+
+multi sub dump-tree (\p, IO() $file --> Bool) is export(:tree) {
+	$file.spurt: get-sometree(p).raku
+}
 multi sub dump-tree (\p, IO() :$to! --> Bool) { dump-tree(p, $to) }
 
 =begin pod
@@ -292,5 +304,7 @@ Stashes named after enum variants refer to the enum stash:
   is A::, B::;
   is A::. C::;
 This leads to infinite loop if not handled
+
+We can't just store a copy of the CORE:: tree at runtime, because it can be modified before we saved it
 
 =end pod
