@@ -1,5 +1,20 @@
 unit module Package::WellKnown;
 
+=begin pod
+
+=head2 Usage
+  use Package::WellKnown;
+
+  get-locals; # the sorted list of keys in MY::
+  get-packaged; # the sorted list of keys in OUR::
+
+  get-ours; # the sorted list of symbols in the current package excluding classes, modules, etc…
+  get-mine; # the sorted list of symbols defined in this immediate scope with my. This excludes our-declared symbols.
+
+  get-mypacks; # the sorted list of packages declared in this immediate scope with my
+  get-ourpacks; # the sorted list of packages declared in this package
+
+=end pod
 # Inside unit scope, includes CORE::<$! $/ $=pod> cf. (UNIT::.keys (&) CORE::.keys)
 our $UNIT-SYMBOLS = set <!UNIT_MARKER $! $/ $=finish $=pod $¢ EXPORT GLOBALish>;
 our $PKG-SYMBOLS = set

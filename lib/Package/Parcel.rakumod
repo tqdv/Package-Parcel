@@ -1,17 +1,83 @@
-unit module Parcel;
-# Naming it Parcel instead of Package::Parcel makes EVAL work in Tree.read FIXME
+unit module Package::Parcel;
 # Because package tracking → parcel tracking
 
-# :DEFAULT exports pretty-tree, pretty-tree-diff and diff-tree, get-tree and read-tree
-# :tree exports specific tree functions like get-coretree, get-sometree, etc…
-# :func exports the low-level functions get-ptype-str and subtree
+=begin pod
+
+=head2 Synopsis
+
+ get-tree.dump("tree.raku"); # Dumps MY, OUR and CORE trees into the file "tree.raku"
+
+ my $tree = read-tree("tree.raku"); # Reads a tree from a file
+
+ pretty-tree $tree; # Pretty prints the tree in $tree
+ pretty-tree "tree.raku"; # Can also pretty print trees dumped in files
+
+ diff-tree $tree, $other-tree; # Create a diff of the two trees
+ diff-tree $tree, "other-tree.raku"; # Also works with filenames
+
+ pretty-tree-diff $tree, "other-tree.raku"; # Pretty print out the differences
+
+=head2 Usage
+
+=head3 Import keys
+
+=item :DEFAULT exports pretty-tree, diff-tree, pretty-tree-diff, get-tree and read-tree
+=item :tree exports specific tree functions like get-coretree, get-sometree, etc…
+=item :func exports the low-level functions get-ptype-str and subtree
+
+=head2 Description
+
+Serialize package trees to track where symbols get stored. Useful for checking why symbols are exported or not.
+
+=end pod
 
 use Tilwa::WithVal;
 use Tilwa::MergeList;
+use Tilwa::ListInsert;
 
 =head2 Trees
 
-enum Ptype <Package Module Class Role Enum Variant Subset CurriedRole Native NQPClass NativeRef Metamodely NQPParametricRole>;
+# We avoid using an enum, because it would overwrite Package in the current scope.
+# That would break the EVAL in Tree.read as it couldn't find Package::Parcel anymore.
+# So this:
+#enum Ptype <Package Module Class Role Enum Variant Subset CurriedRole Native NQPClass NativeRef Metamodely NQPParametricRole>;
+# Will put Ptype, as well as Package, Module, Class, …, NQPParametricRole into scope. That overwrites our Package::Parcel
+
+# We also avoid defining classes like this because somehow, Ptype gets automatically exported CHECKME
+#class Ptype::Package           does Ptype[1] {};
+#class Ptype::Module            does Ptype[2] {};
+#class Ptype::Class             does Ptype[3] {};
+#class Ptype::Role              does Ptype[4] {};
+#class Ptype::Enum              does Ptype[5] {};
+#class Ptype::Variant           does Ptype[6] {};
+#class Ptype::Subset            does Ptype[7] {};
+#class Ptype::CurriedRole       does Ptype[8] {};
+#class Ptype::Native            does Ptype[9] {};
+#class Ptype::NQPClass          does Ptype[10] {};
+#class Ptype::NativeRef         does Ptype[11] {};
+#class Ptype::Metamodely        does Ptype[12] {};
+#class Ptype::NQPParametricRole does Ptype[13] {};
+
+role Ptype[UInt $id = 0] {
+	method Str { self.^shortname }
+	method Numeric { $id }
+	method defined { $id != 0 }
+};
+
+# This puts Ptype::Package into OUR::Ptype, so it ends up being our-scoped, is this normal ? CHECKME
+my class Ptype::Package           does Ptype[1] {};
+my class Ptype::Module            does Ptype[2] {};
+my class Ptype::Class             does Ptype[3] {};
+my class Ptype::Role              does Ptype[4] {};
+my class Ptype::Enum              does Ptype[5] {};
+my class Ptype::Variant           does Ptype[6] {};
+my class Ptype::Subset            does Ptype[7] {};
+my class Ptype::CurriedRole       does Ptype[8] {};
+my class Ptype::Native            does Ptype[9] {};
+my class Ptype::NQPClass          does Ptype[10] {};
+my class Ptype::NativeRef         does Ptype[11] {};
+my class Ptype::Metamodel         does Ptype[12] {};
+my class Ptype::NQPParametricRole does Ptype[13] {};
 
 sub get-ptype-str (Str $HOW --> Ptype) is export(:func) {
 	given $HOW {
@@ -43,7 +109,7 @@ class Pkg {
 
 	method gist {
 		"("
-		~ $!type.lc
+		~ $!type.Str.lc
 		~ " " ~ $!name
 		~ (" → $!refname" if $!refname)
 		~ ")"
@@ -105,7 +171,7 @@ class Tree {
 			with $tree.node {
 				print
 					($longname ?? .longname !! .name || .longname || .refname)
-						~ (" {.lc}" with .type)
+					~ (" {.Str.lc}" with .type)
 					~  (" → {.refname}" if .refname)
 			}
 			if $tree.symbols && $symbols.defined && ($symbols eq 'all' || $symbols eq 'leaf' && !$tree.children) {
@@ -201,13 +267,18 @@ sub pretty-tree-diff ($a, $b, |c) is export { pretty-tree diff-tree($a, $b), |c 
 
 =head2 Dumping trees
 
+#| Used in subtree to indicated that something is not a package but a sigilless variable
+class GotSigilless is Exception {
+	method message { "Tried to process a sigilless variable as a package" }
+}
+
 #|[ Builds the package tree starting at p, with displayname $name and name $longname.
 The last one is used to check if the package is aliased, so set it correctly
 Example: subtree X::Attribute, 'Attribute', 'X::Attribute'
 ]
 sub subtree (\p, Str $name, Str $longname --> Tree) is export(:func) {
 	my $fullname = p.^name;
-	if $fullname ~~ /LoweredAwayLexical/ { return Tree }
+	if $fullname ~~ /LoweredAwayLexical/ { die GotSigilless.new } # Excludes sigilless variables
 	my $type = get-ptype(p);
 	my @symbols; # symbols in the current package that aren't packages
 
@@ -233,7 +304,7 @@ sub subtree (\p, Str $name, Str $longname --> Tree) is export(:func) {
 			# Guess the type
 			if r.^name ~~ /Metamodel/ {
 				take Tree.new: node => Pkg.new(
-					:name($key), :type(Ptype::Metamodely), |with-val :$refname, :longname($n-longname));
+					:name($key), :type(Ptype::Metamodel), |with-val :$refname, :longname($n-longname));
 			} else {
 				my $type = get-ptype-str(r.HOW.^name);
 				take Tree.new: node => Pkg.new(:name($key), :$type, |with-val :$refname, :longname($n-longname));
@@ -247,6 +318,11 @@ sub subtree (\p, Str $name, Str $longname --> Tree) is export(:func) {
 
 		my $v = subtree r, $key, $n-longname;
 		take $v with $v;
+
+		CATCH { when GotSigilless {
+			# Since it's variable, insert it into the sorted list of symbols
+			@symbols.&insert( @symbols.first(* after $key):k // *, $key)
+		}}
 	}
 
 	my $has-keys = so p::; # calling .keys on a null object dies unconditionally
@@ -281,7 +357,7 @@ our @PACKS = <MY OUR CORE GLOBAL PROCESS COMPILING CALLER CALLERS DYNAMIC OUTER 
 sub get-sometree (\p --> Tree) is export(:tree) {
 	my $name = p.^name;
 	my $shortname = $name.split('::')[*-1];
-	$name ~~ s/ '::'? @PACKS [ '::' @PACKS <wb> ]? '::'? //;
+	$name ~~ s/ '::'? @PACKS [ '::' @PACKS <wb> ]? '::'? //; # Remove pseudo-packages
 
 	subtree(p, $shortname, $name)
 }
